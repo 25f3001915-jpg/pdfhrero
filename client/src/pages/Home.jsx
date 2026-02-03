@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import ToolCard from '../components/ToolCard'
 import SEO from '../components/SEO'
+import ToolSearch from '../components/ToolSearch'
 
 export default function Home() {
     const tools = [
@@ -256,7 +257,7 @@ export default function Home() {
                 ogDescription="Free online PDF tools - Merge, split, compress, convert, and edit PDFs. 100% secure, no signup required."
                 ogImage="https://pdfhero.in/assets/og/home.png"
                 twitterTitle="PDFHero - Advanced PDF Tools"
-                twitterDescription="Free online PDF tools - Merge, split, compress, convert, and edit PDFs."
+                twitterDescription="Free online PDF tools - Merge, split, convert, and edit PDFs."
                 twitterImage="https://pdfhero.in/assets/og/home.png"
                 schema={websiteSchema}
             />
@@ -272,29 +273,36 @@ export default function Home() {
                 canonical="https://pdfhero.in/"
                 schema={breadcrumbSchema}
             />
-            <div>
-            {/* Hero Section */}
-            <section className="hero-gradient text-white section-padding">
-                <div className="container-custom">
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.8 }}
-                        className="text-center max-w-4xl mx-auto"
-                    >
-                        <h1 className="mb-6 animate-fade-in font-display font-bold text-4xl md:text-6xl">
-                            Every tool you need to work with PDFs in one place
-                        </h1>
-                        <p className="text-xl md:text-2xl mb-8 text-gray-100 animate-slide-up opacity-90">
-                            Every tool you need to use PDFs, at your fingertips. All are 100% FREE and easy to use! Merge, split, compress, convert, rotate, unlock and watermark PDFs with just a few clicks.
-                        </p>
-                    </motion.div>
+            
+            {/* HERO SECTION WITH ADVANCED SEARCH */}
+            <section className="hero">
+                <div className="hero-bg" aria-hidden="true"></div>
+                
+                <div className="hero-inner">
+                    <div className="badge">100% Free • Secure • Fast</div>
+                    
+                    <h1 className="hero-title">
+                        Every PDF Tool in One Place
+                        <span className="hero-sub">Merge, split, compress, convert, OCR & more</span>
+                    </h1>
+                    
+                    <ToolSearch />
+                    
+                    <div className="hero-cta">
+                        <a className="btn primary" href="#tools">Browse All Tools</a>
+                        <a className="btn ghost" href="/dashboard">Go to Dashboard</a>
+                    </div>
                 </div>
             </section>
-
-            {/* Tools Grid Section */}
-            <section id="tools" className="section-padding bg-gray-50 dark:bg-dark-bg -mt-10 pt-10">
-                <div className="container-custom">
+            
+            {/* TOOLS GRID SECTION */}
+            <section id="tools" className="tools">
+                <div className="section-head">
+                    <h2>Popular PDF Tools</h2>
+                    <p>Click any tool. Use search to find instantly.</p>
+                </div>
+                
+                <div className="grid-container">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
                         {tools.map((tool, index) => (
                             <motion.div
@@ -315,7 +323,7 @@ export default function Home() {
             <section id="features" className="section-padding bg-white dark:bg-dark-card mt-12">
                 <div className="container-custom">
                     <div className="text-center mb-16">
-                        <h2 className="mb-4 gradient-text text-3xl font-bold">The PDFHero Soluton</h2>
+                        <h2 className="mb-4 gradient-text text-3xl font-bold">The PDFHero Solution</h2>
                         <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
                             We make PDF tasks easy so you can get your work done faster.
                         </p>
@@ -354,7 +362,6 @@ export default function Home() {
                     </div>
                 </div>
             </section>
-        </div>
         </>
     )
 }

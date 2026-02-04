@@ -12,6 +12,20 @@ export default defineConfig({
             }
         }
     },
+    build: {
+        outDir: 'dist',
+        sourcemap: false,
+        chunkSizeWarningLimit: 1000,
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    vendor: ['react', 'react-dom'],
+                    pdf: ['pdfjs-dist', 'pdf-lib'],
+                    ui: ['framer-motion', 'lucide-react']
+                }
+            }
+        }
+    },
     optimizeDeps: {
         include: ['pdfjs-dist']
     }

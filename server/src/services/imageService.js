@@ -1,8 +1,8 @@
-const sharp = require('sharp');
-const fs = require('fs/promises');
-const path = require('path');
+import sharp from 'sharp'
+import fs from 'fs/promises'
+import path from 'path'
 
-class ImageService {
+export class ImageService {
     /**
      * Compress Image with specific quality
      * @param {string} filePath - Path to input file
@@ -26,9 +26,11 @@ class ImageService {
                     pipeline = pipeline.jpeg({ quality, mozjpeg: true })
                     break
                 case 'png':
+                    // PNG compression is different, uses compressionLevel (0-9) and palette
                     pipeline = pipeline.png({
-                        compressionLevel: Math.min(9, Math.max(0, Math.round(quality / 12))),
-                        palette: quality < 80
+                        quality,
+                        compressionLevel: 9,
+                        palette: true
                     })
                     break
                 case 'webp':
@@ -160,4 +162,4 @@ class ImageService {
     }
 }
 
-module.exports = ImageService;
+export default ImageService

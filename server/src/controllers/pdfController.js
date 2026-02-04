@@ -1,531 +1,494 @@
-const PDFService = require('../services/pdfService');
-const User = require('../models/User');
-const ProcessingHistory = require('../models/ProcessingHistory');
-const logger = require('../utils/logger');
-const path = require('path');
-const fs = require('fs').promises;
+import fs from 'fs/promises'
+import path from 'path'
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
+import PDFService from '../services/pdfService.js'
 
 // @desc    Merge multiple PDFs
-// @route   POST /api/pdf/merge
-// @access  Private
-exports.mergePDFs = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length < 2) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload at least 2 PDF files'
-      });
+export const mergePDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.files || req.files.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload at least 2 PDF files'
+            })
+        }
+
+        const filePaths = req.files.map(file => {
+            filesToCleanup.push(file.path)
+            return file.path
+        })
+
+        const mergedPdfBytes = await PDFService.mergePDFs(filePaths)
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `merged-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, mergedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'merged.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to merge PDFs',
+            error: error.message
+        })
     }
-
-    const startTime = Date.now();
-    
-    // Process files
-    const result = await PDFService.mergePDFs(req.files, req.body);
-    
-    // Update user usage
-    req.user.incrementUsage(result.size);
-    req.user.addProcessingHistory('merge', 'multiple_files', result.size, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'merge',
-      originalFiles: req.files.map(file => ({
-        name: file.originalname,
-        size: file.size,
-        type: file.mimetype
-      })),
-      resultFile: {
-        name: path.basename(result.path),
-        size: result.size,
-        path: result.path
-      },
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed'
-    });
-
-    // Send file
-    res.setHeader('Content-Disposition', `attachment; filename="merged_${Date.now()}.pdf"`);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.sendFile(result.path, async (err) => {
-      if (err) {
-        logger.error('Error sending file:', err);
-      }
-      // Cleanup temp file after sending
-      try {
-        await fs.unlink(result.path);
-      } catch (cleanupErr) {
-        logger.debug('Failed to cleanup temp file:', cleanupErr);
-      }
-    });
-  } catch (err) {
-    logger.error('PDF merge error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+}
 
 // @desc    Split PDF
-// @route   POST /api/pdf/split
-// @access  Private
-exports.splitPDF = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
-    }
+export const splitPDF = async (req, res) => {
+    const filesToCleanup = []
 
-    const startTime = Date.now();
-    const file = req.files[0];
-    
-    // Process file
-    const result = await PDFService.splitPDF(file, req.body);
-    
-    // Update user usage
-    let totalSize = 0;
-    if (result.files) {
-      totalSize = result.files.reduce((sum, f) => sum + f.size, 0);
-    }
-    req.user.incrementUsage(totalSize);
-    req.user.addProcessingHistory('split', file.originalname, totalSize, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'split',
-      originalFiles: [{
-        name: file.originalname,
-        size: file.size,
-        type: file.mimetype
-      }],
-      resultFile: result.files ? {
-        name: 'split_files',
-        size: totalSize
-      } : null,
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed',
-      batchId: result.isZip ? `split_${Date.now()}` : null,
-      batchTotal: result.files ? result.files.length : 1
-    });
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
 
-    if (result.isZip) {
-      // Create and send ZIP file
-      const zipResult = await PDFService.createZip(result.files, `split_${Date.now()}.zip`);
-      
-      res.setHeader('Content-Disposition', `attachment; filename="split_${Date.now()}.zip"`);
-      res.setHeader('Content-Type', 'application/zip');
-      res.sendFile(zipResult.path, async (err) => {
-        if (err) {
-          logger.error('Error sending ZIP file:', err);
+        filesToCleanup.push(req.file.path)
+        const pdfBytes = await fs.readFile(req.file.path)
+        const pdfDoc = await PDFDocument.load(pdfBytes)
+        const pageCount = pdfDoc.getPageCount()
+
+        // For simplicity, split each page into separate PDF
+        const splitPdfs = []
+        for (let i = 0; i < pageCount; i++) {
+            const newPdf = await PDFDocument.create()
+            const [copiedPage] = await newPdf.copyPages(pdfDoc, [i])
+            newPdf.addPage(copiedPage)
+
+            const pdfBytes = await newPdf.save()
+            const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `page-${i + 1}-${Date.now()}.pdf`)
+            await fs.writeFile(outputPath, pdfBytes)
+            splitPdfs.push(outputPath)
+            filesToCleanup.push(outputPath)
         }
-        // Cleanup temp files
-        try {
-          await fs.unlink(zipResult.path);
-          for (const file of result.files) {
-            await fs.unlink(file.path);
-          }
-        } catch (cleanupErr) {
-          logger.debug('Failed to cleanup temp files:', cleanupErr);
-        }
-      });
-    } else {
-      // Send single file
-      const fileResult = result.files[0];
-      res.setHeader('Content-Disposition', `attachment; filename="${fileResult.name}"`);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.sendFile(fileResult.path, async (err) => {
-        if (err) {
-          logger.error('Error sending file:', err);
-        }
-        try {
-          await fs.unlink(fileResult.path);
-        } catch (cleanupErr) {
-          logger.debug('Failed to cleanup temp file:', cleanupErr);
-        }
-      });
+
+        // For demo, send first page (in production, create a ZIP file)
+        res.download(splitPdfs[0], 'split-page-1.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to split PDF',
+            error: error.message
+        })
     }
-  } catch (err) {
-    logger.error('PDF split error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+}
 
 // @desc    Compress PDF
-// @route   POST /api/pdf/compress
-// @access  Private
-exports.compressPDF = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
+export const compressPDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
+
+        filesToCleanup.push(req.file.path)
+        const pdfBytes = await fs.readFile(req.file.path)
+        const pdfDoc = await PDFDocument.load(pdfBytes)
+
+        // Save with compression (pdf-lib automatically compresses)
+        const compressedPdfBytes = await pdfDoc.save({
+            useObjectStreams: true,
+            addDefaultPage: false
+        })
+
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `compressed-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, compressedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'compressed.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to compress PDF',
+            error: error.message
+        })
     }
+}
 
-    const startTime = Date.now();
-    const file = req.files[0];
-    
-    // Process file
-    const result = await PDFService.compressPDF(file, req.body);
-    
-    // Update user usage
-    req.user.incrementUsage(result.size);
-    req.user.addProcessingHistory('compress', file.originalname, result.size, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'compress',
-      originalFiles: [{
-        name: file.originalname,
-        size: result.originalSize,
-        type: file.mimetype
-      }],
-      resultFile: {
-        name: `compressed_${Date.now()}.pdf`,
-        size: result.size,
-        path: result.path
-      },
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed',
-      compressionRatio: result.compressionRatio
-    });
+// @desc    Rotate PDF
+export const rotatePDF = async (req, res) => {
+    const filesToCleanup = []
 
-    // Send file
-    res.setHeader('Content-Disposition', `attachment; filename="compressed_${Date.now()}.pdf"`);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.sendFile(result.path, async (err) => {
-      if (err) {
-        logger.error('Error sending file:', err);
-      }
-      try {
-        await fs.unlink(result.path);
-      } catch (cleanupErr) {
-        logger.debug('Failed to cleanup temp file:', cleanupErr);
-      }
-    });
-  } catch (err) {
-    logger.error('PDF compression error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
+
+        const rotation = parseInt(req.body.rotation) || 90
+        filesToCleanup.push(req.file.path)
+
+        const pdfBytes = await fs.readFile(req.file.path)
+        const pdfDoc = await PDFDocument.load(pdfBytes)
+        const pages = pdfDoc.getPages()
+
+        pages.forEach(page => {
+            page.setRotation({ angle: rotation, type: 'degrees' })
+        })
+
+        const rotatedPdfBytes = await pdfDoc.save()
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `rotated-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, rotatedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'rotated.pdf', async (err) => {
+            await cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to rotate PDF',
+            error: error.message
+        })
+    }
+}
 
 // @desc    Add watermark to PDF
-// @route   POST /api/pdf/watermark
-// @access  Private
-exports.addWatermark = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length < 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload at least 1 PDF file'
-      });
-    }
+export const watermarkPDF = async (req, res) => {
+    const filesToCleanup = []
 
-    const startTime = Date.now();
-    const pdfFile = req.files.find(f => f.mimetype === 'application/pdf');
-    const imageFile = req.files.find(f => f.mimetype.startsWith('image/'));
-    
-    if (!pdfFile) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload a PDF file'
-      });
-    }
-
-    // Process file
-    const result = await PDFService.addWatermark(pdfFile, {
-      ...req.body,
-      image: imageFile
-    });
-    
-    // Update user usage
-    req.user.incrementUsage(result.size);
-    req.user.addProcessingHistory('watermark', pdfFile.originalname, result.size, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'watermark',
-      originalFiles: [{
-        name: pdfFile.originalname,
-        size: pdfFile.size,
-        type: pdfFile.mimetype
-      }],
-      resultFile: {
-        name: `watermarked_${Date.now()}.pdf`,
-        size: result.size,
-        path: result.path
-      },
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed'
-    });
-
-    // Send file
-    res.setHeader('Content-Disposition', `attachment; filename="watermarked_${Date.now()}.pdf"`);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.sendFile(result.path, async (err) => {
-      if (err) {
-        logger.error('Error sending file:', err);
-      }
-      try {
-        await fs.unlink(result.path);
-      } catch (cleanupErr) {
-        logger.debug('Failed to cleanup temp file:', cleanupErr);
-      }
-    });
-  } catch (err) {
-    logger.error('PDF watermark error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
-
-// @desc    Perform OCR on PDF
-// @route   POST /api/pdf/ocr
-// @access  Private
-exports.performOCR = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
-    }
-
-    const startTime = Date.now();
-    const file = req.files[0];
-    
-    // Process file
-    const result = await PDFService.performOCR(file, req.body);
-    
-    // Update user usage
-    req.user.incrementUsage(result.size || 0);
-    req.user.addProcessingHistory('ocr', file.originalname, result.size || 0, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'ocr',
-      originalFiles: [{
-        name: file.originalname,
-        size: file.size,
-        type: file.mimetype
-      }],
-      resultFile: result.path ? {
-        name: `ocr_${Date.now()}.pdf`,
-        size: result.size,
-        path: result.path
-      } : null,
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed',
-      ocrAccuracy: result.accuracy,
-      featuresUsed: [{ name: 'languages', value: result.language }]
-    });
-
-    if (result.path) {
-      // Send searchable PDF
-      res.setHeader('Content-Disposition', `attachment; filename="ocr_${Date.now()}.pdf"`);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.sendFile(result.path, async (err) => {
-        if (err) {
-          logger.error('Error sending file:', err);
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
         }
-        try {
-          await fs.unlink(result.path);
-        } catch (cleanupErr) {
-          logger.debug('Failed to cleanup temp file:', cleanupErr);
-        }
-      });
-    } else {
-      // Send OCR text result
-      res.status(200).json({
-        status: 'success',
-        data: {
-          text: result.text,
-          accuracy: result.accuracy,
-          language: result.language,
-          processingTime: result.processingTime
-        }
-      });
+
+        const watermarkText = req.body.text || 'WATERMARK'
+        const opacity = parseFloat(req.body.opacity) || 0.5
+
+        filesToCleanup.push(req.file.path)
+        const pdfBytes = await fs.readFile(req.file.path)
+        const pdfDoc = await PDFDocument.load(pdfBytes)
+        const pages = pdfDoc.getPages()
+        const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
+
+        pages.forEach(page => {
+            const { width, height } = page.getSize()
+            page.drawText(watermarkText, {
+                x: width / 2 - 100,
+                y: height / 2,
+                size: 50,
+                font: font,
+                color: rgb(0.5, 0.5, 0.5),
+                opacity: opacity,
+                rotate: { angle: 45, type: 'degrees' }
+            })
+        })
+
+        const watermarkedPdfBytes = await pdfDoc.save()
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `watermarked-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, watermarkedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'watermarked.pdf', async (err) => {
+            await cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to add watermark',
+            error: error.message
+        })
     }
-  } catch (err) {
-    logger.error('PDF OCR error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+}
+
+// @desc    Protect PDF with password
+export const protectPDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
+
+        const password = req.body.password
+        if (!password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please provide a password'
+            })
+        }
+
+        filesToCleanup.push(req.file.path)
+
+        const protectedPdfBytes = await PDFService.protectPDF(req.file.path, password)
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `protected-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, protectedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'protected.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to protect PDF',
+            error: error.message
+        })
+    }
+}
+
+// @desc    Unlock PDF
+export const unlockPDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
+
+        const password = req.body.password || '' // Password might be empty if not encrypted or user thinks it isn't
+
+        filesToCleanup.push(req.file.path)
+
+        const unlockedPdfBytes = await PDFService.unlockPDF(req.file.path, password)
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `unlocked-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, unlockedPdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'unlocked.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to unlock PDF. Incorrect password or file corrupted.',
+            error: error.message
+        })
+    }
+}
+
+// @desc    Convert images to PDF
+export const imageToPDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload at least one image'
+            })
+        }
+
+        const imagePaths = req.files.map(file => {
+            filesToCleanup.push(file.path)
+            return file.path
+        })
+
+        const pdfBytes = await PDFService.imagesToPDF(imagePaths)
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `images-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, pdfBytes)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'images.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        console.error('Image to PDF error:', error)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to convert images to PDF',
+            error: error.message
+        })
+    }
+}
 
 // @desc    Convert PDF to images
-// @route   POST /api/pdf/to-images
-// @access  Private
-exports.pdfToImages = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
-    }
+export const pdfToImage = async (req, res) => {
+    const filesToCleanup = []
 
-    const startTime = Date.now();
-    const file = req.files[0];
-    
-    // Process file
-    const result = await PDFService.pdfToImages(file, req.body);
-    
-    // Update user usage
-    let totalSize = 0;
-    if (result.images) {
-      totalSize = result.images.reduce((sum, img) => sum + img.size, 0);
-    }
-    req.user.incrementUsage(totalSize);
-    req.user.addProcessingHistory('pdf-to-image', file.originalname, totalSize, Date.now() - startTime);
-    await req.user.save();
-    
-    // Save processing history
-    await ProcessingHistory.create({
-      userId: req.user.id,
-      operation: 'pdf-to-image',
-      originalFiles: [{
-        name: file.originalname,
-        size: file.size,
-        type: file.mimetype
-      }],
-      processingTime: result.processingTime,
-      startTime: new Date(startTime),
-      endTime: new Date(),
-      status: 'completed',
-      batchId: result.isZip ? `images_${Date.now()}` : null,
-      batchTotal: result.images ? result.images.length : 1
-    });
-
-    if (result.isZip) {
-      // Create and send ZIP file
-      const zipResult = await PDFService.createZip(result.images, `pdf_images_${Date.now()}.zip`);
-      
-      res.setHeader('Content-Disposition', `attachment; filename="pdf_images_${Date.now()}.zip"`);
-      res.setHeader('Content-Type', 'application/zip');
-      res.sendFile(zipResult.path, async (err) => {
-        if (err) {
-          logger.error('Error sending ZIP file:', err);
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
         }
-        // Cleanup temp files
-        try {
-          await fs.unlink(zipResult.path);
-          for (const image of result.images) {
-            await fs.unlink(image.path);
-          }
-        } catch (cleanupErr) {
-          logger.debug('Failed to cleanup temp files:', cleanupErr);
-        }
-      });
-    } else {
-      // Send single image
-      const imageResult = result.images[0];
-      res.setHeader('Content-Disposition', `attachment; filename="${imageResult.name}"`);
-      res.setHeader('Content-Type', `image/${path.extname(imageResult.name).slice(1)}`);
-      res.sendFile(imageResult.path, async (err) => {
-        if (err) {
-          logger.error('Error sending image:', err);
-        }
-        try {
-          await fs.unlink(imageResult.path);
-        } catch (cleanupErr) {
-          logger.debug('Failed to cleanup temp file:', cleanupErr);
-        }
-      });
+
+        filesToCleanup.push(req.file.path)
+
+        // Note: Converting PDF to images requires additional libraries like pdf-poppler or pdf2pic
+        // For demo purposes, we'll return a placeholder response
+        res.status(501).json({
+            success: false,
+            message: 'PDF to image conversion requires additional setup. Please install pdf-poppler or pdf2pic.'
+        })
+    } catch (error) {
+        await cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to convert PDF to images',
+            error: error.message
+        })
     }
-  } catch (err) {
-    logger.error('PDF to images error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+}
 
-// @desc    Get PDF metadata
-// @route   POST /api/pdf/metadata
-// @access  Private
-exports.getMetadata = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
+// @desc    Convert Word to PDF
+export const wordToPDF = async (req, res) => {
+    const filesToCleanup = []
+
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a Word document'
+            })
+        }
+
+        filesToCleanup.push(req.file.path)
+
+        // Note: Word to PDF conversion requires LibreOffice or similar
+        // For demo purposes, we'll return a placeholder response
+        res.status(501).json({
+            success: false,
+            message: 'Word to PDF conversion requires LibreOffice installation. Please set up LibreOffice API.'
+        })
+    } catch (error) {
+        await cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to convert Word to PDF',
+            error: error.message
+        })
     }
+}
 
-    const file = req.files[0];
-    const metadata = await PDFService.getPDFMetadata(file.path);
-    
-    res.status(200).json({
-      status: 'success',
-      data: metadata
-    });
-  } catch (err) {
-    logger.error('PDF metadata error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+// @desc    Convert PDF to Word
+export const pdfToWord = async (req, res) => {
+    const filesToCleanup = []
 
-// @desc    Validate PDF
-// @route   POST /api/pdf/validate
-// @access  Private
-exports.validatePDF = async (req, res, next) => {
-  try {
-    if (!req.files || req.files.length !== 1) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Please upload exactly 1 PDF file'
-      });
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please upload a PDF file'
+            })
+        }
+
+        filesToCleanup.push(req.file.path)
+
+        // Note: PDF to Word conversion requires specialized libraries
+        // For demo purposes, we'll return a placeholder response
+        res.status(501).json({
+            success: false,
+            message: 'PDF to Word conversion requires additional libraries. Consider using pdf2docx or similar.'
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({
+            success: false,
+            message: 'Failed to convert PDF to Word',
+            error: error.message
+        })
     }
+}
 
-    const file = req.files[0];
-    const validation = await PDFService.validatePDF(file.path);
-    
-    res.status(200).json({
-      status: 'success',
-      data: validation
-    });
-  } catch (err) {
-    logger.error('PDF validation error:', err);
-    res.status(500).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
+// @desc    Organize PDF (Reorder/Delete)
+export const organizePDF = async (req, res) => {
+    const filesToCleanup = []
+    try {
+        if (!req.file) return res.status(400).json({ message: 'Please upload a PDF' })
+
+        // pages is JSON string of array indices e.g. "[0, 2, 1]"
+        const pageIndices = JSON.parse(req.body.pages || '[]')
+
+        filesToCleanup.push(req.file.path)
+        const processedPdf = await PDFService.organizePDF(req.file.path, pageIndices)
+
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `organized-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, processedPdf)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'organized.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({ success: false, message: 'Failed to organize PDF', error: error.message })
+    }
+}
+
+// @desc    Add Page Numbers
+export const addPageNumbers = async (req, res) => {
+    const filesToCleanup = []
+    try {
+        if (!req.file) return res.status(400).json({ message: 'Please upload a PDF' })
+
+        const position = req.body.position || 'bottom-center'
+
+        filesToCleanup.push(req.file.path)
+        const processedPdf = await PDFService.addPageNumbers(req.file.path, position)
+
+        const outputPath = path.join(process.env.UPLOAD_DIR || './uploads', `numbered-${Date.now()}.pdf`)
+        await fs.writeFile(outputPath, processedPdf)
+        filesToCleanup.push(outputPath)
+
+        res.download(outputPath, 'numbered.pdf', async (err) => {
+            await PDFService.cleanupFiles(filesToCleanup)
+            if (err) console.error('Download error:', err)
+        })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({ success: false, message: 'Failed to add page numbers', error: error.message })
+    }
+}
+
+// @desc    OCR Image to Text
+export const ocrImage = async (req, res) => {
+    const filesToCleanup = []
+    try {
+        if (!req.file) return res.status(400).json({ message: 'Please upload an image' })
+
+        filesToCleanup.push(req.file.path)
+        const text = await PDFService.ocrImage(req.file.path)
+
+        // cleanup immediately as we send text response
+        await PDFService.cleanupFiles(filesToCleanup)
+
+        res.json({ success: true, text })
+    } catch (error) {
+        await PDFService.cleanupFiles(filesToCleanup)
+        res.status(500).json({ success: false, message: 'Failed to extract text', error: error.message })
+    }
+}

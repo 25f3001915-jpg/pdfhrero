@@ -1,0 +1,13 @@
+{
+  "name": "pdfhero",
+  "version": "1.0.0",
+  "description": "PDFHero - Advanced PDF processing tools",
+  "scripts": {
+    "build": "cd client && npm run build",
+    "dev": "cd client && npm run dev"
+  },
+  "workspaces": [
+    "client",
+    "server"
+  ]
+}
